@@ -1,3 +1,41 @@
+let filesInAllDirs () =
+  let rec filesInAllDirs' dir =
+    let ignoredDirs = ["node_modules"; ".git"] in
+    let thingsInCurrDir =
+      BatSys.readdir dir
+      |> BatArray.map (fun file -> Filename.concat dir file)
+    in
+    let filesInCurrDir =
+      thingsInCurrDir
+      |> BatArray.filter (fun a -> not @@ BatSys.is_directory a)
+    in
+    let filesInSubDirs =
+      thingsInCurrDir
+      |> BatArray.filter (fun thing ->
+          BatSys.is_directory thing &&
+          (BatList.for_all
+            (fun d -> Filename.basename d <> Filename.basename thing)
+            ignoredDirs))
+      |> BatArray.map filesInAllDirs'
+    in
+    BatArray.append filesInCurrDir (BatArray.concat @@ BatArray.to_list filesInSubDirs)
+  in
+  BatArray.to_list @@ filesInAllDirs' "./"
+
+let sameFileNameClashes () =
+  filesInAllDirs ()
+  |> BatList.sort (fun a b -> compare (Filename.basename a) (Filename.basename b))
+  |> BatList.group_consecutive (fun a b -> Filename.basename a = Filename.basename b)
+  |> BatList.filter (fun block -> BatList.length block > 1)
+
+let formatClashes clashes =
+  clashes
+  |> BatList.map (fun block ->
+    block
+    |> BatList.map (fun x -> "- " ^ x)
+    |> BatString.concat "\n")
+  |> BatString.concat "\n\n"
+
 (* yo I just wanna read some values from terminal geez *)
 (* mostly copied from http://rosettacode.org/wiki/Execute_a_system_command#OCaml
    because I can't code *)
@@ -21,8 +59,9 @@ let buildCommand ~fileName =
   let builtName = (Filename.chop_extension fileName) ^ ".out" in
   (* ocamfind is temporary, just for bootstrapping, until we dogfood this and
      publish batteries and pcre and yojson on npm (hyeah right, we're screwed)*)
+  (* TODO: set env OCAMLRUNPARAM=b *)
   Printf.sprintf {|
-    ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors %s -o %s
+    ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors -g %s -o %s
   |} fileName builtName
 
 let getSubstringMaybe s idx =
@@ -53,10 +92,10 @@ let promptForInstall unboundModuleName =
        else (
          let (output, err, exitCode) = syscall @@ Printf.sprintf "npm install %s" npmModuleName in
          match exitCode with
-          | Unix.WEXITED 0 -> true
-          (* TODO: what is the install success msg? *)
-          | Unix.WEXITED r -> false
-          | Unix.WSIGNALED _ | Unix.WSTOPPED _  -> false)
+         | Unix.WEXITED 0 -> true
+         (* TODO: what is the install success msg? *)
+         | Unix.WEXITED r -> false
+         | Unix.WSIGNALED _ | Unix.WSTOPPED _  -> false)
      with BatIO.No_more_input -> false)
   | Unix.WEXITED r ->
     (* error's probably npm failing to get the module from registry; ignore it *)
@@ -68,6 +107,14 @@ let () =
   else
     let fileName = Sys.argv.(1) in
     if not (Sys.file_exists fileName) then print_endline @@ fileName ^ " cannot be found."
+    else
+    let clashes = sameFileNameClashes () in
+    if BatList.length clashes > 0 then
+      Printf.printf
+        "We detected files of the same name:\n%s.\n\nUnder this build system, \
+every file in your own library needs to be unique, since they correspond to \
+the name of the module you can freely refer to anywhere in the library.\n"
+        (formatClashes clashes)
     else
       let (successOutput, err, exitCode) = syscall @@ buildCommand ~fileName in
       match exitCode with
