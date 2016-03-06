@@ -1,3 +1,24 @@
+(* let () = print_endline May.asd *)
+
+(* yo I just wanna read some values from terminal geez *)
+(* mostly copied from http://rosettacode.org/wiki/Execute_a_system_command#OCaml
+   because I can't code *)
+let syscall ?env cmd =
+  let (ic, oc, ec) = Unix.open_process_full cmd (Unix.environment ()) in
+  let buf1 = Buffer.create 96 in
+  let buf2 = Buffer.create 48 in
+  (try
+     while true do Buffer.add_channel buf1 ic 1 done
+   with End_of_file -> ());
+  (try
+     while true do Buffer.add_channel buf2 ec 1 done
+   with End_of_file -> ());
+  let exit_status = Unix.close_process_full (ic, oc, ec) in
+  (* check_exit_status exit_status; *)
+  (Buffer.contents buf1,
+   Buffer.contents buf2,
+   exit_status)
+
 let filesInAllDirs () =
   let rec filesInAllDirs' dir =
     let ignoredDirs = ["node_modules"; ".git"] in
@@ -7,7 +28,10 @@ let filesInAllDirs () =
     in
     let filesInCurrDir =
       thingsInCurrDir
-      |> BatArray.filter (fun a -> not @@ BatSys.is_directory a)
+      |> BatArray.filter (fun a ->
+        not @@ BatSys.is_directory a &&
+        BatString.ends_with a ".ml"
+      )
     in
     let filesInSubDirs =
       thingsInCurrDir
@@ -36,25 +60,6 @@ let formatClashes clashes =
     |> BatString.concat "\n")
   |> BatString.concat "\n\n"
 
-(* yo I just wanna read some values from terminal geez *)
-(* mostly copied from http://rosettacode.org/wiki/Execute_a_system_command#OCaml
-   because I can't code *)
-let syscall ?env cmd =
-  let (ic, oc, ec) = Unix.open_process_full cmd (Unix.environment ()) in
-  let buf1 = Buffer.create 96 in
-  let buf2 = Buffer.create 48 in
-  (try
-     while true do Buffer.add_channel buf1 ic 1 done
-   with End_of_file -> ());
-  (try
-     while true do Buffer.add_channel buf2 ec 1 done
-   with End_of_file -> ());
-  let exit_status = Unix.close_process_full (ic, oc, ec) in
-  (* check_exit_status exit_status; *)
-  (Buffer.contents buf1,
-   Buffer.contents buf2,
-   exit_status)
-
 let buildCommand ~fileName =
   let builtName = (Filename.chop_extension fileName) ^ ".out" in
   (* ocamfind is temporary, just for bootstrapping, until we dogfood this and
@@ -63,10 +68,6 @@ let buildCommand ~fileName =
   Printf.sprintf {|
     ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors -g %s -o %s
   |} fileName builtName
-
-let getSubstringMaybe s idx =
-  try Some (Pcre.get_substring s idx)
-  with Not_found | Invalid_argument _ -> None
 
 let promptForInstall unboundModuleName =
   let npmModuleName = BatString.lowercase unboundModuleName in
@@ -103,7 +104,7 @@ let promptForInstall unboundModuleName =
   | Unix.WSIGNALED _ | Unix.WSTOPPED _  -> false
 
 let () =
-  if Array.length Sys.argv = 1 then print_endline "Please pass the name of a file to build."
+  if BatArray.length Sys.argv = 1 then print_endline "Please pass the name of a file to build."
   else
     let fileName = Sys.argv.(1) in
     if not (Sys.file_exists fileName) then print_endline @@ fileName ^ " cannot be found."
