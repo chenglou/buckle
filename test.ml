@@ -12,5 +12,4 @@ let b = 10
 
 let () =
   print_endline "hello";
-  (* log "hello" *)
-  (* print_endline Haha.a *)
+  print_endline May.crushOfMyLife
