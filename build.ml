@@ -1,4 +1,5 @@
-(* let () = print_endline May.asd *)
+(* need qualified imports *)
+let sp = Printf.sprintf
 
 (* yo I just wanna read some values from terminal geez *)
 (* mostly copied from http://rosettacode.org/wiki/Execute_a_system_command#OCaml
@@ -20,8 +21,9 @@ let syscall ?env cmd =
    exit_status)
 
 let filesInAllDirs () =
+  (* TODO: warn somewhere if file name same as project name *)
   let rec filesInAllDirs' dir =
-    let ignoredDirs = ["node_modules"; ".git"] in
+    let ignoredDirs = ["node_modules"; ".git"; "_build"] in
     let thingsInCurrDir =
       BatSys.readdir dir
       |> BatArray.map (fun file -> Filename.concat dir file)
@@ -63,13 +65,103 @@ let deps () =
        |> BatString.trim
        |> BatString.nsplit ~by:"\n"
        |> BatList.sort (fun info1 info2 ->
-           let file1 = BatString.slice ~last:(BatString.index info1 ':') info1 in
-           let file2 = BatString.slice ~last:(BatString.index info2 ':') info2 in
-           let (index1, _) = BatList.findi (fun _ file -> file = file1) filesInTopologicalOrder in
-           let (index2, _) = BatList.findi (fun _ file -> file = file2) filesInTopologicalOrder in
-           index1 - index2)
-     | _ -> Printf.printf "Something went wrong: %s" err; [])
-  | _ -> Printf.printf "Something went wrong: %s" err; []
+            let file1 = BatString.slice ~last:(BatString.index info1 ':') info1 in
+            let file2 = BatString.slice ~last:(BatString.index info2 ':') info2 in
+            let (index1, _) = BatList.findi (fun _ file -> file = file1) filesInTopologicalOrder in
+            let (index2, _) = BatList.findi (fun _ file -> file = file2) filesInTopologicalOrder in
+            index1 - index2)
+        |> BatList.map (fun dep ->
+            let (chunk1, chunk2) = BatString.split dep ~by:":" in
+            (chunk1, BatString.nsplit (BatString.trim chunk2) ~by:" "))
+     | _ -> Printf.printf "Something went wrong (deps inner): %s" err; [])
+  | _ -> Printf.printf "Something went wrong (deps outer): %s" err; []
+
+(* let () = BatList.iter (fun (a, b) ->
+  print_string a;
+  print_string "-:-";
+  BatList.iter (fun a -> print_string @@ a ^ "=") b;
+  print_endline ""
+) (deps ()) *)
+
+let safeRmdir dir =
+  if BatSys.file_exists dir then
+    ignore @@ syscall @@ "rm -r " ^ dir
+
+let generateModuleAlias libraryName moduleNamesLower =
+  let fileContent =
+    moduleNamesLower
+    |> BatList.map (fun name ->
+      sp
+        "module %s = %s__%s"
+        (BatString.capitalize name)
+        (BatString.capitalize libraryName)
+        name)
+    |> BatString.join "\n"
+  in
+  let filePath = "_build" ^ Filename.dir_sep ^ libraryName ^ ".ml" in
+  let outChannel = open_out filePath in
+  Printf.fprintf outChannel "%s\n" fileContent;
+  close_out outChannel;
+  let (result, err, exitCode) = syscall (
+    sp "ocamlc -no-alias-deps -w -49 -c %s" filePath
+  ) in
+  (match exitCode with
+   | Unix.WEXITED 0 -> print_endline "everything ok"
+   | _ -> Printf.printf "Something went wrong (generateModuleAlias): %s" err)
+
+let compileForEach libraryName fileNamesRel =
+  fileNamesRel |> BatList.iter (fun fileNameRel ->
+    let moduleNameLower = Filename.chop_extension @@ Filename.basename fileNameRel in
+    let (out, err, exitCode) = syscall (
+      sp
+        "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors -g -open %s -I _build %s -o %s -c %s"
+        (* "ocamlc -open %s -I _build %s -o %s -c %s" *)
+        (BatString.capitalize libraryName)
+        ("-I ./node_modules/*/_build")
+        ("_build" ^ Filename.dir_sep ^ libraryName ^ "__" ^ moduleNameLower ^ ".cmo")
+        fileNameRel
+    ) in
+    (match exitCode with
+    | Unix.WEXITED 0 -> print_endline @@ "Successfully compiled: " ^ fileNameRel
+    | _ -> Printf.printf "Something went wrong (compileForEach): %s" err)
+  )
+
+let buildCma libraryName moduleNamesLower =
+  let (out, err, exitCode) = syscall (
+    sp
+      "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors -g -open %s -I _build %s -a -o %s %s %s %s"
+      (* "ocamlc -open %s -I _build %s -o %s -c %s" *)
+      (BatString.capitalize libraryName)
+      ("-I ./node_modules/*/_build")
+      ("_build" ^ Filename.dir_sep ^ "lib.cma")
+      ("./node_modules/*/_build/lib.cma")
+      ("_build" ^ Filename.dir_sep ^ libraryName ^ ".cmo")
+      (moduleNamesLower
+        |> BatList.map (fun name ->
+          "_build" ^ Filename.dir_sep ^ libraryName ^ "__" ^ name ^ ".cmo")
+        |> BatString.join " ")
+      in
+  ) in
+  (match exitCode with
+  | Unix.WEXITED 0 -> print_endline "Successfully compiled cma"
+  | _ -> Printf.printf "Something went wrong (compileForEach): %s" err)
+
+let compileAll () =
+  safeRmdir "_build";
+  BatUnix.mkdir "_build" 0o777;
+  let libraryName = Filename.basename @@ BatSys.getcwd () in
+  let allDeps = deps () in
+  let fileNamesRel = BatList.map BatTuple.Tuple2.first allDeps in
+  let moduleNamesLower =
+    fileNamesRel
+    |> BatList.map Filename.basename
+    |> BatList.map Filename.chop_extension
+  in
+  generateModuleAlias libraryName moduleNamesLower;
+  compileForEach libraryName fileNamesRel;
+  buildCma libraryName moduleNamesLower
+
+let () = compileAll ()
 
 let sameFileNameClashes files =
   files
@@ -89,7 +181,7 @@ let buildCommand ~fileName =
   let builtName = (Filename.chop_extension fileName) ^ ".out" in
   (* ocamfind is temporary, just for bootstrapping, until we dogfood this and
      publish batteries and pcre and yojson on npm (hyeah right, we're screwed)*)
-  Printf.sprintf {|
+  sp {|
     ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors -g %s -o %s
   |} fileName builtName
 
@@ -115,7 +207,7 @@ let promptForInstall unboundModuleName =
        let ch = BatIO.read BatIO.stdin in
        if ch <> 'y' then false
        else (
-         let (output, err, exitCode) = syscall @@ Printf.sprintf "npm install %s" npmModuleName in
+         let (output, err, exitCode) = syscall @@ sp "npm install %s" npmModuleName in
          match exitCode with
          | Unix.WEXITED 0 -> true
          (* TODO: what is the install success msg? *)
@@ -177,6 +269,6 @@ let () =
                 Printf.eprintf "%s\n" (BetterErrorsMain.parseFromString ~customErrorParsers:[] err)
             )
           | Unix.WEXITED r ->
-            Printf.printf "Something went wrong: %s %d" err r
+            Printf.printf "Something went wrong (top): %s %d" err r
           | Unix.WSIGNALED _ | Unix.WSTOPPED _  -> ()
   )
