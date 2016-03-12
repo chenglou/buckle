@@ -1,0 +1,5 @@
+PKG Pcre Batteries Yojson BetterErrors
+
+S ./
+
+B _build/
