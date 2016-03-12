@@ -7,6 +7,11 @@ type path = Path of string
 type moduleName = Mod of string
 type libraryName = Lib of string
 
+(* assuming we don't change cwd dynamically here *)
+let cwd = BatSys.getcwd ()
+
+(* path join util *)
+let pJoin = BatString.join sep
 (* yo I just wanna read some values from terminal geez *)
 (* mostly copied from http://rosettacode.org/wiki/Execute_a_system_command#OCaml
    because I can't code *)
@@ -30,7 +35,7 @@ let safeRmdir dir =
   if BatSys.file_exists dir then
     ignore @@ syscall @@ "rm -r " ^ dir
 
-let mkdirp2 dir : unit =
+(* let mkdirp2 dir : unit =
   let chunks = BatString.nsplit ~by:sep dir in
   (* might start with a slash, which translates to empty first cell when we split on / *)
   let chunks = if BatList.at chunks 0 = "" then
@@ -42,7 +47,7 @@ let mkdirp2 dir : unit =
     let curr = BatList.take (i + 1) chunks |> BatString.join sep in
     if BatSys.file_exists curr then ()
     else BatUnix.mkdir curr 0o777
-  ) chunks
+  ) chunks *)
 
 let mkdirp dir : unit =
   let (out, err, exitCode) = syscall @@ "mkdir -p " ^ dir in
@@ -138,7 +143,7 @@ let generateModuleAlias libBuildDir (Lib libName) allModuleNames =
         (BatString.uncapitalize name))
     |> BatString.join "\n"
   in
-  let filePath = libBuildDir ^ sep ^ libName ^ ".ml" in
+  let filePath = pJoin [libBuildDir; libName ^ ".ml"] in
   let outChannel = open_out filePath in
   Printf.fprintf outChannel "%s\n" fileContent;
   close_out outChannel;
@@ -164,10 +169,10 @@ let compileForEach libBuildDir (Lib libName) sourcePaths thirdPartyModules =
         (* the "include" artifact paths, for third-party deps *)
         (thirdPartyModules
           |> BatList.map (fun (Mod m) ->
-            "-I " ^ BatSys.getcwd () ^ sep ^ "_build" ^ sep ^ (BatString.uncapitalize m))
+            "-I " ^ pJoin [cwd; "_build"; BatString.uncapitalize m])
           |> BatString.join " ")
         (* build path for this lib *)
-        (libBuildDir ^ sep ^ libName ^ "__" ^ (BatString.uncapitalize sourceModuleName) ^ ".cmo")
+        (pJoin [libBuildDir; libName ^ "__" ^ (BatString.uncapitalize sourceModuleName) ^ ".cmo"])
         (* source path *)
         p
     ) in
@@ -186,21 +191,20 @@ let buildCma libBuildDir (Lib libName) allModuleNames thirdPartyModules =
       (* the "include" artifact paths, for third-party deps *)
       (thirdPartyModules
         |> BatList.map (fun (Mod m) ->
-          "-I " ^ BatSys.getcwd () ^ sep ^ "_build" ^ sep ^ (BatString.uncapitalize m))
+          "-I " ^ pJoin [cwd; "_build"; BatString.uncapitalize m])
         |> BatString.join " ")
       (* the destination location of the cma file we're building *)
-      (libBuildDir ^ sep ^ "lib.cma")
+      (pJoin [libBuildDir; "lib.cma"])
       (* required third-party cma files *)
       (thirdPartyModules
-        |> BatList.map (fun (Mod m) ->
-          BatSys.getcwd () ^ sep ^ "_build" ^ sep ^ m ^ sep ^ "lib.cma")
+        |> BatList.map (fun (Mod m) -> pJoin [cwd; "_build"; m; "lib.cma"])
         |> BatString.join " ")
       (* the module alias module built artifact we created through generateModuleAlias *)
-      (libBuildDir ^ sep ^ libName ^ ".cmo")
+      (pJoin [libBuildDir; libName ^ ".cmo"])
       (* every compiled module in current library, in order *)
       (allModuleNames
         |> BatList.map (fun (Mod m) ->
-          libBuildDir ^ sep ^ libName ^ "__" ^ (BatString.uncapitalize m) ^ ".cmo")
+          pJoin [libBuildDir; libName ^ "__" ^ (BatString.uncapitalize m) ^ ".cmo"])
         |> BatString.join " ")
   ) in
   (match exitCode with
@@ -242,8 +246,8 @@ let thirdPartyModules allDeps =
 (* depth-first pre-order traversal to build the dep graph (tree really) *)
 let rec compileAll' ?(isTopLib=false) (Lib libraryName) =
   let librarySourceRoot = Path (
-    if isTopLib then BatSys.getcwd ()
-    else BatSys.getcwd () ^ sep ^ "node_modules" ^ sep ^ libraryName
+    if isTopLib then cwd
+    else pJoin [cwd; "node_modules"; libraryName]
   ) in
   let allDeps = deps librarySourceRoot in
   let sourcePaths = BatList.map BatTuple.Tuple2.first allDeps in
@@ -256,15 +260,15 @@ let rec compileAll' ?(isTopLib=false) (Lib libraryName) =
       thirdPartyModules''
   );
   (* reached bottom, start building from the sink nodes of the dep graph *)
-  let libBuildDir = BatSys.getcwd () ^ sep ^ "_build" ^ sep ^ libraryName in
+  let libBuildDir = pJoin [cwd; "_build"; libraryName] in
   mkdirp libBuildDir;
   generateModuleAlias libBuildDir (Lib libraryName) allModuleNames;
   compileForEach libBuildDir (Lib libraryName) sourcePaths thirdPartyModules'';
   buildCma libBuildDir (Lib libraryName) allModuleNames thirdPartyModules''
 
 let compileAll () =
-  let topRoot = BatSys.getcwd () in
-  let topLibBuildDir = topRoot ^ sep ^ "_build" in
+  let topRoot = cwd in
+  let topLibBuildDir = pJoin [topRoot; "_build"] in
   (* wipe, start clean *)
   safeRmdir topLibBuildDir;
   compileAll' ~isTopLib:true (Lib (Filename.basename topRoot))
@@ -335,7 +339,7 @@ let () =
     let fileName = Sys.argv.(1) in
     if not (Sys.file_exists fileName) then print_endline @@ fileName ^ " cannot be found."
     else
-      let files = filesInAllDirs (Path (BatSys.getcwd ())) in
+      let files = filesInAllDirs (Path cwd) in
       let clashes = sameFileNameClashes files in
       if BatList.length clashes > 0 then
         Printf.printf
