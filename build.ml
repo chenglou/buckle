@@ -1,8 +1,9 @@
 (* need qualified imports *)
 let sp = Printf.sprintf
+let sep = Filename.dir_sep
 
 (* tired of converting stuff wrongly *)
-type filePath = FilePath of string
+type path = Path of string
 type moduleName = Mod of string
 type libraryName = Lib of string
 
@@ -25,24 +26,48 @@ let syscall ?env cmd =
    Buffer.contents buf2,
    exit_status)
 
-let filesInAllDirs () =
+let safeRmdir dir =
+  if BatSys.file_exists dir then
+    ignore @@ syscall @@ "rm -r " ^ dir
+
+let mkdirp2 dir : unit =
+  let chunks = BatString.nsplit ~by:sep dir in
+  (* might start with a slash, which translates to empty first cell when we split on / *)
+  let chunks = if BatList.at chunks 0 = "" then
+    BatList.modify_at 0 (fun x -> sep ^ x) chunks
+  else
+    chunks
+  in
+  BatList.iteri (fun i _ ->
+    let curr = BatList.take (i + 1) chunks |> BatString.join sep in
+    if BatSys.file_exists curr then ()
+    else BatUnix.mkdir curr 0o777
+  ) chunks
+
+let mkdirp dir : unit =
+  let (out, err, exitCode) = syscall @@ "mkdir -p " ^ dir in
+  match exitCode with
+   | Unix.WEXITED 0 -> ()
+   | _ -> Printf.printf "Something went wrong (mkdirp): %s" err
+
+let filesInAllDirs root =
   (* TODO: warn somewhere if file name same as project name *)
-  let rec filesInAllDirs' (FilePath dir) =
+  let rec filesInAllDirs' (Path dir) =
     let ignoredDirs = ["node_modules"; ".git"; "_build"] in
     let thingsInCurrDir =
       BatSys.readdir dir
-      |> BatArray.map (fun file -> FilePath (Filename.concat dir file))
+      |> BatArray.map (fun file -> Path (Filename.concat dir file))
     in
     let filesInCurrDir =
       thingsInCurrDir
-      |> BatArray.filter (fun (FilePath a) ->
+      |> BatArray.filter (fun (Path a) ->
           not @@ BatSys.is_directory a &&
           BatString.ends_with a ".ml"
         )
     in
     let filesInSubDirs =
       thingsInCurrDir
-      |> BatArray.filter (fun (FilePath a) ->
+      |> BatArray.filter (fun (Path a) ->
           BatSys.is_directory a &&
           (BatList.for_all
              (fun d -> Filename.basename d <> Filename.basename a)
@@ -51,12 +76,12 @@ let filesInAllDirs () =
     in
     BatArray.append filesInCurrDir (BatArray.concat @@ BatArray.to_list filesInSubDirs)
   in
-  BatArray.to_list @@ filesInAllDirs' (FilePath "./")
+  BatArray.to_list @@ filesInAllDirs' root
 
-let deps (): (filePath * moduleName list) list =
+let deps root: (path * moduleName list) list =
   let filesString =
-    filesInAllDirs ()
-    |> BatList.map (fun (FilePath a) -> a)
+    filesInAllDirs root
+    |> BatList.map (fun (Path a) -> a)
     |> BatString.concat " "
   in
   let (resultInTopologicalOrder, err, exitCode) = syscall @@ "ocamldep -sort " ^ filesString in
@@ -81,7 +106,7 @@ let deps (): (filePath * moduleName list) list =
             index1 - index2)
         |> BatList.map (fun dep ->
             let (chunk1, chunk2) = BatString.split dep ~by:":" in
-            (FilePath chunk1,
+            (Path chunk1,
               chunk2
               |> BatString.trim
               |> BatString.nsplit ~by:" "
@@ -89,23 +114,22 @@ let deps (): (filePath * moduleName list) list =
      | _ -> Printf.printf "Something went wrong (deps inner): %s" err; [])
   | _ -> Printf.printf "Something went wrong (deps outer): %s" err; []
 
-let printDeps = BatList.iter (fun (FilePath a, b) ->
+let printDeps = BatList.iter (fun (Path a, b) ->
   print_string a;
   print_string "-:-";
   BatList.iter (fun (Mod a) -> print_string @@ a ^ "=") b;
   print_endline ""
 )
 
-let safeRmdir dir =
-  if BatSys.file_exists dir then
-    ignore @@ syscall @@ "rm -r " ^ dir
-
-let filePathToModuleName (FilePath p) =
+let pathToModuleName (Path p) =
   Mod (Filename.basename p |> Filename.chop_extension |> BatString.capitalize)
 
-let generateModuleAlias (Lib libName) moduleNames =
+let moduleNameToLibraryName (Mod m) =
+  Lib (BatString.uncapitalize m)
+
+let generateModuleAlias libBuildDir (Lib libName) allModuleNames =
   let fileContent =
-    moduleNames
+    allModuleNames
     |> BatList.map (fun (Mod name) ->
       sp
         "module %s = %s__%s"
@@ -114,7 +138,7 @@ let generateModuleAlias (Lib libName) moduleNames =
         (BatString.uncapitalize name))
     |> BatString.join "\n"
   in
-  let filePath = "_build" ^ Filename.dir_sep ^ libName ^ ".ml" in
+  let filePath = libBuildDir ^ sep ^ libName ^ ".ml" in
   let outChannel = open_out filePath in
   Printf.fprintf outChannel "%s\n" fileContent;
   close_out outChannel;
@@ -122,21 +146,29 @@ let generateModuleAlias (Lib libName) moduleNames =
     sp "ocamlc -no-alias-deps -w -49 -c %s" filePath
   ) in
   (match exitCode with
-   | Unix.WEXITED 0 -> print_endline "everything ok"
+   | Unix.WEXITED 0 -> print_endline "everything ok (generateModuleAlias)"
    | _ -> Printf.printf "Something went wrong (generateModuleAlias): %s" err)
 
-let compileForEach (Lib libName) filePaths thirdPartyArtifactPaths =
-  filePaths |> BatList.iter (fun (FilePath p as fp) ->
-    let (Mod moduleName) = filePathToModuleName fp in
+let compileForEach libBuildDir (Lib libName) sourcePaths thirdPartyModules =
+  (* compile (but not link) each source file inside the current library *)
+  sourcePaths |> BatList.iter (fun (Path p as fp) ->
+    let (Mod sourceModuleName) = pathToModuleName fp in
     let (out, err, exitCode) = syscall (
       sp
-        "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors -g -open %s -I _build %s -o %s -c %s"
-        (* "ocamlc -open %s -I _build %s -o %s -c %s" *)
+        "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors \
+        -g -open %s -I _build -I %s %s -o %s -c %s"
+        (* the module alias module we created through generateModuleAlias *)
         (BatString.capitalize libName)
-        (thirdPartyArtifactPaths
-          |> BatList.map (fun (FilePath a) -> "-I " ^ a)
+        (* include ourselves in the include path, to find the module alias cmo *)
+        libBuildDir
+        (* the "include" artifact paths, for third-party deps *)
+        (thirdPartyModules
+          |> BatList.map (fun (Mod m) ->
+            "-I " ^ BatSys.getcwd () ^ sep ^ "_build" ^ sep ^ (BatString.uncapitalize m))
           |> BatString.join " ")
-        ("_build" ^ Filename.dir_sep ^ libName ^ "__" ^ (BatString.uncapitalize moduleName) ^ ".cmo")
+        (* build path for this lib *)
+        (libBuildDir ^ sep ^ libName ^ "__" ^ (BatString.uncapitalize sourceModuleName) ^ ".cmo")
+        (* source path *)
         p
     ) in
     (match exitCode with
@@ -144,30 +176,38 @@ let compileForEach (Lib libName) filePaths thirdPartyArtifactPaths =
     | _ -> Printf.printf "Something went wrong (compileForEach): %s" err)
   )
 
-let buildCma (Lib libName) moduleNames thirdPartyArtifactPaths =
+let buildCma libBuildDir (Lib libName) allModuleNames thirdPartyModules =
   let (out, err, exitCode) = syscall (
     sp
-      "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors -g -open %s -I _build %s -a -o %s %s %s %s"
-      (* "ocamlc -open %s -I _build %s -o %s -c %s" *)
+      "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors \
+      -g -open %s -I _build %s -a -o %s %s %s %s"
+      (* module we're opening *)
       (BatString.capitalize libName)
-      (thirdPartyArtifactPaths
-        |> BatList.map (fun (FilePath a) -> "-I " ^ a)
+      (* the "include" artifact paths, for third-party deps *)
+      (thirdPartyModules
+        |> BatList.map (fun (Mod m) ->
+          "-I " ^ BatSys.getcwd () ^ sep ^ "_build" ^ sep ^ (BatString.uncapitalize m))
         |> BatString.join " ")
-      ("_build" ^ Filename.dir_sep ^ "lib.cma")
-      (thirdPartyArtifactPaths
-        |> BatList.map (fun (FilePath a) -> a ^ Filename.dir_sep ^ "lib.cma" )
+      (* the destination location of the cma file we're building *)
+      (libBuildDir ^ sep ^ "lib.cma")
+      (* required third-party cma files *)
+      (thirdPartyModules
+        |> BatList.map (fun (Mod m) ->
+          BatSys.getcwd () ^ sep ^ "_build" ^ sep ^ m ^ sep ^ "lib.cma")
         |> BatString.join " ")
-      ("_build" ^ Filename.dir_sep ^ libName ^ ".cmo")
-      (moduleNames
-        |> BatList.map (fun (Mod name) ->
-          "_build" ^ Filename.dir_sep ^ libName ^ "__" ^ (BatString.uncapitalize name) ^ ".cmo")
+      (* the module alias module built artifact we created through generateModuleAlias *)
+      (libBuildDir ^ sep ^ libName ^ ".cmo")
+      (* every compiled module in current library, in order *)
+      (allModuleNames
+        |> BatList.map (fun (Mod m) ->
+          libBuildDir ^ sep ^ libName ^ "__" ^ (BatString.uncapitalize m) ^ ".cmo")
         |> BatString.join " ")
   ) in
   (match exitCode with
   | Unix.WEXITED 0 -> print_endline "Successfully compiled cma"
-  | _ -> Printf.printf "Something went wrong (compileForEach): %s" err)
+  | _ -> Printf.printf "Something went wrong (buildCma): %s" err)
 
-let getThirdPartyModules allDeps =
+let thirdPartyModules allDeps =
   let temporaryExceptions = [
     Mod "Array";
     Mod "BatArray";
@@ -190,49 +230,58 @@ let getThirdPartyModules allDeps =
   let firstPartyModules =
     allDeps
     |> BatList.map BatTuple.Tuple2.first
-    |> BatList.map filePathToModuleName
+    |> BatList.map pathToModuleName
   in
-  let thirdPartyDeps =
-    allDeps
-    |> BatList.map BatTuple.Tuple2.second
-    |> BatList.concat
-    |> BatList.filter (fun x ->
-      (not @@ BatList.exists (fun ex -> ex = x) temporaryExceptions) &&
-      (not @@ BatList.exists (fun ex -> ex = x) firstPartyModules))
-  in
-  assert (thirdPartyDeps = [Mod "Bookshop"]);
-  thirdPartyDeps
+  allDeps
+  |> BatList.map BatTuple.Tuple2.second
+  |> BatList.concat
+  |> BatList.filter (fun x ->
+    (not @@ BatList.exists (fun ex -> ex = x) temporaryExceptions) &&
+    (not @@ BatList.exists (fun ex -> ex = x) firstPartyModules))
+
+(* depth-first pre-order traversal to build the dep graph (tree really) *)
+let rec compileAll' ?(isTopLib=false) (Lib libraryName) =
+  let librarySourceRoot = Path (
+    if isTopLib then BatSys.getcwd ()
+    else BatSys.getcwd () ^ sep ^ "node_modules" ^ sep ^ libraryName
+  ) in
+  let allDeps = deps librarySourceRoot in
+  let sourcePaths = BatList.map BatTuple.Tuple2.first allDeps in
+  let allModuleNames = BatList.map pathToModuleName sourcePaths in
+  let thirdPartyModules'' = thirdPartyModules allDeps in
+  if thirdPartyModules'' <> [] then (
+    (* haven't reached sink nodes yet; recurse before building ourselves *)
+    BatList.iter
+      (fun moduleName -> compileAll' (moduleNameToLibraryName moduleName))
+      thirdPartyModules''
+  );
+  (* reached bottom, start building from the sink nodes of the dep graph *)
+  let libBuildDir = BatSys.getcwd () ^ sep ^ "_build" ^ sep ^ libraryName in
+  mkdirp libBuildDir;
+  generateModuleAlias libBuildDir (Lib libraryName) allModuleNames;
+  compileForEach libBuildDir (Lib libraryName) sourcePaths thirdPartyModules'';
+  buildCma libBuildDir (Lib libraryName) allModuleNames thirdPartyModules''
 
 let compileAll () =
-  safeRmdir "_build";
-  BatUnix.mkdir "_build" 0o777;
-  let libraryName = Lib (Filename.basename @@ BatSys.getcwd ()) in
-  let allDeps = deps () in
-  let filePaths = BatList.map BatTuple.Tuple2.first allDeps in
-  let moduleNames = BatList.map filePathToModuleName filePaths in
-  (* let thirdPartyArtifactPaths = [FilePath "./node_modules/Bookshop/_build"] in *)
-  let thirdPartyArtifactPaths =
-    getThirdPartyModules allDeps
-    |> BatList.map (fun (Mod a) ->
-      FilePath (sp "./node_modules/%s/_build" (BatString.uncapitalize a)))
-  in
-  generateModuleAlias libraryName moduleNames;
-  compileForEach libraryName filePaths thirdPartyArtifactPaths;
-  buildCma libraryName moduleNames thirdPartyArtifactPaths
+  let topRoot = BatSys.getcwd () in
+  let topLibBuildDir = topRoot ^ sep ^ "_build" in
+  (* wipe, start clean *)
+  safeRmdir topLibBuildDir;
+  compileAll' ~isTopLib:true (Lib (Filename.basename topRoot))
 
 let () = compileAll ()
 
 let sameFileNameClashes files =
   files
-  |> BatList.sort (fun (FilePath a) (FilePath b) -> compare (Filename.basename a) (Filename.basename b))
-  |> BatList.group_consecutive (fun (FilePath a) (FilePath b) -> Filename.basename a = Filename.basename b)
+  |> BatList.sort (fun (Path a) (Path b) -> compare (Filename.basename a) (Filename.basename b))
+  |> BatList.group_consecutive (fun (Path a) (Path b) -> Filename.basename a = Filename.basename b)
   |> BatList.filter (fun block -> BatList.length block > 1)
 
 let formatClashes clashes =
   clashes
   |> BatList.map (fun block ->
       block
-      |> BatList.map (fun (FilePath x) -> "- " ^ x)
+      |> BatList.map (fun (Path p) -> "- " ^ p)
       |> BatString.concat "\n")
   |> BatString.concat "\n\n"
 
@@ -286,7 +335,7 @@ let () =
     let fileName = Sys.argv.(1) in
     if not (Sys.file_exists fileName) then print_endline @@ fileName ^ " cannot be found."
     else
-      let files = filesInAllDirs () in
+      let files = filesInAllDirs (Path (BatSys.getcwd ())) in
       let clashes = sameFileNameClashes files in
       if BatList.length clashes > 0 then
         Printf.printf
@@ -295,12 +344,12 @@ let () =
            the name of the module you can freely refer to anywhere in the library.\n"
           (formatClashes clashes)
       else
-        let fileHasSpaces (FilePath p) = BatString.exists p " " in
+        let fileHasSpaces (Path p) = BatString.exists p " " in
         let filesWithSpaces = BatList.filter fileHasSpaces files in
         if BatList.length filesWithSpaces > 0 then
           Printf.printf
             "Some of your file/folders have spaces in them, this isn't allowed.\n%s"
-            (filesWithSpaces |> BatList.map (fun (FilePath p) -> "- " ^ p) |> BatString.join "\n")
+            (filesWithSpaces |> BatList.map (fun (Path p) -> "- " ^ p) |> BatString.join "\n")
         else
           let (successOutput, err, exitCode) = syscall (buildCommand ~fileName) in
           match exitCode with
