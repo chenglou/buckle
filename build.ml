@@ -159,9 +159,9 @@ let compileForEach (Path libBuildDir) (Lib libName) sourcePaths thirdPartyModule
   sourcePaths |> BatList.iter (fun (Path p as fp) ->
     let (Mod sourceModuleName) = pathToModuleName fp in
     let (out, err, exitCode) = syscall (
-      sp
+      let asd = sp
         "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors \
-        -g -open %s -I _build -I %s %s -o %s -c %s"
+        -g -open %s -I _build -I %s %s -o %s -intf-suffix mli -c %s"
         (* the module alias module we created through generateModuleAlias *)
         (BatString.capitalize libName)
         (* include ourselves in the include path, to find the module alias cmo *)
@@ -175,6 +175,7 @@ let compileForEach (Path libBuildDir) (Lib libName) sourcePaths thirdPartyModule
         (pJoin [libBuildDir; libName ^ "__" ^ (BatString.uncapitalize sourceModuleName) ^ ".cmo"])
         (* source path *)
         p
+        in print_endline asd; asd;
     ) in
     (match exitCode with
     | Unix.WEXITED 0 -> print_endline @@ "Successfully compiled: " ^ p
