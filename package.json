@@ -8,10 +8,17 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "ocaml-paint": "^1.0.0",
-    "ocaml-tomorrow": "^1.0.0"
+    "bookshop": "0.0.2"
   },
   "devDependencies": {},
   "random": 0,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chenglou/buckle.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chenglou/buckle/issues"
+  },
+  "homepage": "https://github.com/chenglou/buckle#readme",
   "description": ""
 }
