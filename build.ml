@@ -53,7 +53,7 @@ let mkdirp dir : unit =
   let (out, err, exitCode) = syscall @@ "mkdir -p " ^ dir in
   match exitCode with
    | Unix.WEXITED 0 -> ()
-   | _ -> Printf.printf "Something went wrong (mkdirp): %s" err
+   | _ -> Printf.printf "Something went wrong (mkdirp):\n%s" err
 
 let filesInAllDirs root =
   (* TODO: warn somewhere if file name same as project name *)
@@ -116,8 +116,8 @@ let deps root: (path * moduleName list) list =
               |> BatString.trim
               |> BatString.nsplit ~by:" "
               |> BatList.map (fun x -> Mod x)))
-     | _ -> Printf.printf "Something went wrong (deps inner): %s" err; [])
-  | _ -> Printf.printf "Something went wrong (deps outer): %s" err; []
+     | _ -> Printf.printf "Something went wrong (deps inner):\n%s" err; [])
+  | _ -> Printf.printf "Something went wrong (deps outer):\n%s" err; []
 
 let printDeps = BatList.iter (fun (Path a, b) ->
   print_string a;
@@ -132,7 +132,7 @@ let pathToModuleName (Path p) =
 let moduleNameToLibraryName (Mod m) =
   Lib (BatString.uncapitalize m)
 
-let generateModuleAlias libBuildDir (Lib libName) allModuleNames =
+let generateModuleAlias (Path libBuildDir) (Lib libName) allModuleNames =
   let fileContent =
     allModuleNames
     |> BatList.map (fun (Mod name) ->
@@ -152,9 +152,9 @@ let generateModuleAlias libBuildDir (Lib libName) allModuleNames =
   ) in
   (match exitCode with
    | Unix.WEXITED 0 -> print_endline "everything ok (generateModuleAlias)"
-   | _ -> Printf.printf "Something went wrong (generateModuleAlias): %s" err)
+   | _ -> Printf.printf "Something went wrong (generateModuleAlias):\n%s" err)
 
-let compileForEach libBuildDir (Lib libName) sourcePaths thirdPartyModules =
+let compileForEach (Path libBuildDir) (Lib libName) sourcePaths thirdPartyModules =
   (* compile (but not link) each source file inside the current library *)
   sourcePaths |> BatList.iter (fun (Path p as fp) ->
     let (Mod sourceModuleName) = pathToModuleName fp in
@@ -178,10 +178,10 @@ let compileForEach libBuildDir (Lib libName) sourcePaths thirdPartyModules =
     ) in
     (match exitCode with
     | Unix.WEXITED 0 -> print_endline @@ "Successfully compiled: " ^ p
-    | _ -> Printf.printf "Something went wrong (compileForEach): %s" err)
+    | _ -> Printf.printf "Something went wrong (compileForEach):\n%s" err)
   )
 
-let buildCma libBuildDir (Lib libName) allModuleNames thirdPartyModules =
+let buildCma (Path libBuildDir) (Lib libName) allModuleNames thirdPartyModules =
   let (out, err, exitCode) = syscall (
     sp
       "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors \
@@ -209,7 +209,7 @@ let buildCma libBuildDir (Lib libName) allModuleNames thirdPartyModules =
   ) in
   (match exitCode with
   | Unix.WEXITED 0 -> print_endline "Successfully compiled cma"
-  | _ -> Printf.printf "Something went wrong (buildCma): %s" err)
+  | _ -> Printf.printf "Something went wrong (buildCma):\n%s" err)
 
 let thirdPartyModules allDeps =
   let temporaryExceptions = [
@@ -262,18 +262,36 @@ let rec compileAll' ?(isTopLib=false) (Lib libraryName) =
   (* reached bottom, start building from the sink nodes of the dep graph *)
   let libBuildDir = pJoin [cwd; "_build"; libraryName] in
   mkdirp libBuildDir;
-  generateModuleAlias libBuildDir (Lib libraryName) allModuleNames;
-  compileForEach libBuildDir (Lib libraryName) sourcePaths thirdPartyModules'';
-  buildCma libBuildDir (Lib libraryName) allModuleNames thirdPartyModules''
+  generateModuleAlias (Path libBuildDir) (Lib libraryName) allModuleNames;
+  compileForEach (Path libBuildDir) (Lib libraryName) sourcePaths thirdPartyModules'';
+  buildCma (Path libBuildDir) (Lib libraryName) allModuleNames thirdPartyModules''
 
-let compileAll () =
+let buildExec (Path libBuildDir) (Lib libName) (Path entryFileName) =
+  let builtEntryFile = Filename.basename @@ Filename.chop_extension entryFileName in
+  let (out, err, exitCode) = syscall (
+    sp
+      "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors \
+      -g -o %s %s %s"
+      (* path of the exec file we're building *)
+      (pJoin [libBuildDir; (Filename.chop_extension entryFileName) ^ ".out"])
+      (* lib.cma path from which we get all the info we need for building *)
+      (pJoin [libBuildDir; "lib.cma"])
+      (* the module alias module built artifact we created through generateModuleAlias *)
+      (pJoin [libBuildDir; libName ^ "__" ^ builtEntryFile ^ ".cmo"])
+  ) in
+  (match exitCode with
+  | Unix.WEXITED 0 -> print_endline "Successfully compiled exec"
+  | _ -> Printf.printf "Something went wrong (buildExec):\n%s" err)
+
+let compileAll entryFileName =
   let topRoot = cwd in
   let topLibBuildDir = pJoin [topRoot; "_build"] in
   (* wipe, start clean *)
   safeRmdir topLibBuildDir;
-  compileAll' ~isTopLib:true (Lib (Filename.basename topRoot))
-
-let () = compileAll ()
+  let libraryName = Filename.basename topRoot in
+  compileAll' ~isTopLib:true (Lib libraryName);
+  let libBuildDir = pJoin [cwd; "_build"; libraryName] in
+  buildExec (Path libBuildDir) (Lib libraryName) entryFileName
 
 let sameFileNameClashes files =
   files
@@ -331,6 +349,8 @@ let promptForInstall unboundModuleName =
     false
   | Unix.WSIGNALED _ | Unix.WSTOPPED _  -> false
 
+(* TODO: bigger flow with downloading modules on-the-fly and auto running the
+executable *)
 let () =
   (* TODO: reorder the warnings. e.g. the warning about paths with no empty
      spaces should come first *)
@@ -355,33 +375,5 @@ let () =
             "Some of your file/folders have spaces in them, this isn't allowed.\n%s"
             (filesWithSpaces |> BatList.map (fun (Path p) -> "- " ^ p) |> BatString.join "\n")
         else
-          let (successOutput, err, exitCode) = syscall (buildCommand ~fileName) in
-          match exitCode with
-          | Unix.WEXITED 0 ->
-            (* exit code of 0 can still mean there are warnings *)
-            if err <> "" then
-              (print_endline @@ BetterErrorsMain.parseFromString ~customErrorParsers:[] err);
-            print_endline @@ BetterErrorsMain.parseFromString ~customErrorParsers:[] successOutput
-          | Unix.WEXITED 2 ->
-            let unboundModuleR = {|Error: Unbound module ([\w\.]*)|} in
-            let unboundModuleWithHintR = {|Unbound module [\w\.]*[\s\S]Hint: Did you mean \S+\?|} in
-            if Pcre.pmatch ~pat:unboundModuleWithHintR err then
-              (* there's a suggestion, probably a typo, bail and don't install dep *)
-              Printf.eprintf "%s\n" (BetterErrorsMain.parseFromString ~customErrorParsers:[] err)
-            else (
-              try
-                let foundMatch = Pcre.exec ~pat:unboundModuleR err in
-                let unboundModuleName = Pcre.get_substring foundMatch 1 in
-                let successfulInstall = promptForInstall unboundModuleName in
-                if successfulInstall then (
-                  (* TODO: now what? rerun? might have other warnings and all *)
-                ) else
-                  Printf.eprintf "%s\n" (BetterErrorsMain.parseFromString ~customErrorParsers:[] err)
-              with Not_found | Invalid_argument _ ->
-                (* no module error probably. Re-print out the compile error *)
-                Printf.eprintf "%s\n" (BetterErrorsMain.parseFromString ~customErrorParsers:[] err)
-            )
-          | Unix.WEXITED r ->
-            Printf.printf "Something went wrong (top): %s %d" err r
-          | Unix.WSIGNALED _ | Unix.WSTOPPED _  -> ()
+          compileAll (Path fileName)
   )
