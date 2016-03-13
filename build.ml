@@ -135,6 +135,9 @@ let moduleNameToLibraryName (Mod m) =
 let generateModuleAlias (Path libBuildDir) (Lib libName) allModuleNames =
   let fileContent =
     allModuleNames
+
+    |> BatList.filter (fun (Mod name) -> name <> "Build")
+
     |> BatList.map (fun (Mod name) ->
       sp
         "module %s = %s__%s"
@@ -148,7 +151,9 @@ let generateModuleAlias (Path libBuildDir) (Lib libName) allModuleNames =
   Printf.fprintf outChannel "%s\n" fileContent;
   close_out outChannel;
   let (result, err, exitCode) = syscall (
+    let asd =
     sp "ocamlc -no-alias-deps -w -49 -c %s" filePath
+    in print_endline asd; asd;
   ) in
   (match exitCode with
    | Unix.WEXITED 0 -> print_endline "everything ok (generateModuleAlias)"
@@ -158,10 +163,15 @@ let compileForEach (Path libBuildDir) (Lib libName) sourcePaths thirdPartyModule
   (* compile (but not link) each source file inside the current library *)
   sourcePaths |> BatList.iter (fun (Path p as fp) ->
     let (Mod sourceModuleName) = pathToModuleName fp in
+    if sourceModuleName = "Build" then ()
+    else
     let (out, err, exitCode) = syscall (
       let asd = sp
-        "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors \
-        -g -open %s -I _build -I %s %s -o %s -intf-suffix mli -c %s"
+      (* sp *)
+        "ocamlc \
+        -g -open %s -I %s %s -o %s -intf-suffix mli -c %s"
+        (* "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors \
+        -g -open %s -I %s %s -o %s -intf-suffix mli -c %s" *)
         (* the module alias module we created through generateModuleAlias *)
         (BatString.capitalize libName)
         (* include ourselves in the include path, to find the module alias cmo *)
@@ -183,10 +193,14 @@ let compileForEach (Path libBuildDir) (Lib libName) sourcePaths thirdPartyModule
   )
 
 let buildCma (Path libBuildDir) (Lib libName) allModuleNames thirdPartyModules =
+  print_endline @@ "start building cma for " ^ libName;
   let (out, err, exitCode) = syscall (
-    sp
-      "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors \
-      -g -open %s -I _build %s -a -o %s %s %s %s"
+    let asd = sp
+    (* sp *)
+      "ocamlc \
+      -g -open %s %s -a -o %s %s %s %s"
+      (* "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors \
+      -g -open %s %s -a -o %s %s %s %s" *)
       (* module we're opening *)
       (BatString.capitalize libName)
       (* the "include" artifact paths, for third-party deps *)
@@ -204,9 +218,13 @@ let buildCma (Path libBuildDir) (Lib libName) allModuleNames thirdPartyModules =
       (pJoin [libBuildDir; libName ^ ".cmo"])
       (* every compiled module in current library, in order *)
       (allModuleNames
+
+        |> BatList.filter (fun (Mod name) -> name <> "Build")
+
         |> BatList.map (fun (Mod m) ->
           pJoin [libBuildDir; libName ^ "__" ^ (BatString.uncapitalize m) ^ ".cmo"])
         |> BatString.join " ")
+    in print_endline asd; asd;
   ) in
   (match exitCode with
   | Unix.WEXITED 0 -> print_endline "Successfully compiled cma"
@@ -270,15 +288,19 @@ let rec compileAll' ?(isTopLib=false) (Lib libraryName) =
 let buildExec (Path libBuildDir) (Lib libName) (Path entryFileName) =
   let builtEntryFile = Filename.basename @@ Filename.chop_extension entryFileName in
   let (out, err, exitCode) = syscall (
-    sp
-      "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors \
+    let asd = sp
+    (* sp *)
+      "ocamlc \
       -g -o %s %s %s"
+      (* "ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors \
+      -g -o %s %s %s" *)
       (* path of the exec file we're building *)
       (pJoin [libBuildDir; (Filename.chop_extension entryFileName) ^ ".out"])
       (* lib.cma path from which we get all the info we need for building *)
       (pJoin [libBuildDir; "lib.cma"])
       (* the module alias module built artifact we created through generateModuleAlias *)
       (pJoin [libBuildDir; libName ^ "__" ^ builtEntryFile ^ ".cmo"])
+    in print_endline asd; asd;
   ) in
   (match exitCode with
   | Unix.WEXITED 0 -> print_endline "Successfully compiled exec"
@@ -307,14 +329,6 @@ let formatClashes clashes =
       |> BatList.map (fun (Path p) -> "- " ^ p)
       |> BatString.concat "\n")
   |> BatString.concat "\n\n"
-
-let buildCommand ~fileName =
-  let builtName = (Filename.chop_extension fileName) ^ ".out" in
-  (* ocamfind is temporary, just for bootstrapping, until we dogfood this and
-     publish batteries and pcre and yojson on npm (hyeah right, we're screwed)*)
-  sp {|
-    ocamlfind ocamlc -linkpkg -package batteries,pcre,yojson,bettererrors -g %s -o %s
-  |} fileName builtName
 
 let promptForInstall unboundModuleName =
   let npmModuleName = BatString.lowercase unboundModuleName in

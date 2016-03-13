@@ -1,6 +1,6 @@
-let getSubstringMaybe s idx =
+(* let getSubstringMaybe s idx =
   try Some (Pcre.get_substring s idx)
-  with Not_found | Invalid_argument _ -> None
+  with Not_found | Invalid_argument _ -> None *)
 
 let () = print_endline @@ "Top level Test module is loaded " ^ FirstDep.asd
 
